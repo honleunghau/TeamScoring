@@ -1,0 +1,188 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Bridge Score Compare</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    .row { display:flex; gap:1rem; align-items:flex-start; }
+    .col { flex:1; }
+    canvas { border:1px solid #ccc; max-width:100%; }
+    pre { background:#f7f7f7; padding:0.5rem; }
+    button { padding:0.5rem 1rem; }
+  </style>
+  <script src="https://unpkg.com/tesseract.js@v4.0.2/dist/tesseract.min.js"></script>
+</head>
+<body>
+  <h1>Bridge Score Compare (Client-side)</h1>
+  <p>Upload two images of score sheets. OCR runs locally in your browser, then the app reports point difference and IMPs.</p>
+
+  <div class="row">
+    <div class="col">
+      <h3>Image 1</h3>
+      <input type="file" id="file1" accept="image/*"><br><br>
+      <canvas id="canvas1"></canvas>
+      <p>Detected candidates: <span id="cands1">-</span></p>
+    </div>
+    <div class="col">
+      <h3>Image 2</h3>
+      <input type="file" id="file2" accept="image/*"><br><br>
+      <canvas id="canvas2"></canvas>
+      <p>Detected candidates: <span id="cands2">-</span></p>
+    </div>
+  </div>
+
+  <p>
+    <button id="runBtn">Run OCR & Compare</button>
+  </p>
+
+  <h3>Result</h3>
+  <pre id="result">No result yet.</pre>
+
+  <script>
+    // Standard IMP table breakpoints (point <= max -> imps)
+    const IMP_BREAKPOINTS = [
+      [10,0],[40,1],[80,2],[120,3],[160,4],[210,5],[260,6],[310,7],[360,8],
+      [420,9],[490,10],[590,11],[740,12],[890,13],[1090,14],[1290,15],[1490,16],
+      [1740,17],[1990,18],[2240,19],[2490,20],[2990,21],[3490,22],[3990,23],[Infinity,24]
+    ];
+
+    function pointsToImps(diff) {
+      diff = Math.abs(diff);
+      for (const [maxp, imps] of IMP_BREAKPOINTS) {
+        if (diff <= maxp) return imps;
+      }
+      return 24;
+    }
+
+    // Load image into canvas with optional resizing and simple preprocessing (convert to grayscale + increase contrast)
+    function drawFileToCanvas(file, canvas) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => {
+          const img = new Image();
+          img.onload = () => {
+            // Resize if too small or too big
+            const maxDim = 1600;
+            let w = img.width, h = img.height;
+            const scale = Math.min(1, maxDim / Math.max(w, h));
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+
+            // simple contrast increase + grayscale
+            const imgData = ctx.getImageData(0,0,w,h);
+            const d = imgData.data;
+            for (let i=0;i<d.length;i+=4) {
+              // grayscale
+              const gray = 0.3*d[i] + 0.59*d[i+1] + 0.11*d[i+2];
+              // enhance contrast
+              const c = Math.min(255, Math.max(0, (gray - 128) * 1.4 + 128));
+              d[i]=d[i+1]=d[i+2]=c;
+            }
+            ctx.putImageData(imgData,0,0);
+
+            resolve();
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // OCR one canvas using Tesseract.js worker; restrict to digits and minus sign
+    async function ocrCanvas(canvas, worker) {
+      // Using psm 6 for a block of text
+      await worker.setParameters({
+        tessedit_char_whitelist: '0123456789-',
+        user_defined_dpi: '300'
+      });
+      const { data: { text } } = await worker.recognize(canvas);
+      return text;
+    }
+
+    function extractIntegers(text) {
+      const matches = text.match(/-?\d+/g);
+      if (!matches) return [];
+      return matches.map(s => parseInt(s,10)).filter(n => Number.isFinite(n));
+    }
+
+    function chooseMostLikely(candidates) {
+      if (!candidates || candidates.length===0) return null;
+      const positives = candidates.filter(n => n>0 && Math.abs(n) < 100000);
+      if (positives.length) return Math.max(...positives);
+      return candidates[candidates.length-1];
+    }
+
+    // wire up file inputs and button
+    const file1 = document.getElementById('file1');
+    const file2 = document.getElementById('file2');
+    const canvas1 = document.getElementById('canvas1');
+    const canvas2 = document.getElementById('canvas2');
+    const runBtn = document.getElementById('runBtn');
+    const resultPre = document.getElementById('result');
+    const cands1Span = document.getElementById('cands1');
+    const cands2Span = document.getElementById('cands2');
+
+    runBtn.addEventListener('click', async () => {
+      if (!file1.files[0] || !file2.files[0]) {
+        alert('Please choose both images.');
+        return;
+      }
+      resultPre.textContent = 'Loading OCR engine (this may take a few seconds)...';
+      const worker = Tesseract.createWorker({
+        logger: m => {
+          // optional: display progress
+          // console.log(m);
+        }
+      });
+      try {
+        await worker.load();
+        await worker.loadLanguage('eng');
+        await worker.initialize('eng');
+
+        await drawFileToCanvas(file1.files[0], canvas1);
+        await drawFileToCanvas(file2.files[0], canvas2);
+
+        resultPre.textContent = 'Running OCR on image 1...';
+        const text1 = await ocrCanvas(canvas1, worker);
+        const cands1 = extractIntegers(text1);
+        cands1Span.textContent = cands1.join(', ') || '-';
+        const score1 = chooseMostLikely(cands1);
+
+        resultPre.textContent = 'Running OCR on image 2...';
+        const text2 = await ocrCanvas(canvas2, worker);
+        const cands2 = extractIntegers(text2);
+        cands2Span.textContent = cands2.join(', ') || '-';
+        const score2 = chooseMostLikely(cands2);
+
+        let out = '';
+        out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`;
+        out += `Image 1 chosen score: ${score1 === null ? 'N/A' : score1}\n\n`;
+        out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`;
+        out += `Image 2 chosen score: ${score2 === null ? 'N/A' : score2}\n\n`;
+
+        if (score1 === null || score2 === null) {
+          out += 'Could not find a numeric score in one or both images.\n';
+        } else {
+          const diff = score1 - score2;
+          const imps = pointsToImps(diff);
+          out += `Point difference (img1 - img2): ${diff}\n`;
+          out += `IMPs: ${imps}\n`;
+        }
+        resultPre.textContent = out;
+      } catch (err) {
+        console.error(err);
+        resultPre.textContent = 'Error: ' + err.message;
+      } finally {
+        await worker.terminate();
+      }
+    });
+  </script>
+</body>
+</html>
