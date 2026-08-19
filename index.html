@@ -14,8 +14,10 @@
     .controls { margin-top:0.5rem; }
     .roi-btn { margin-right:0.5rem; }
     label.inline { display:inline-block; margin-right:1rem; }
+    #logs { background:#111; color:#0f0; padding:10px; max-height:220px; overflow:auto; font-family: monospace; white-space:pre-wrap }
   </style>
-  <script src="https://unpkg.com/tesseract.js@v4.0.2/dist/tesseract.min.js"></script>
+  <!-- Use jsDelivr which is often more reliable than unpkg for tesseract files -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
 </head>
 <body>
   <h1>Bridge Score Compare (Client-side)</h1>
@@ -23,26 +25,30 @@
 
   <div class="row">
     <div class="col">
-      <h3>NS Score Sheet</h3>
+      <h3>Image 1</h3>
       <input type="file" id="file1" accept="image/*"><br><br>
       <canvas id="canvas1"></canvas>
       <div class="controls">
         <button class="roi-btn" id="startRoi1">Start ROI</button>
         <button class="roi-btn" id="crop1">Crop to ROI</button>
         <button class="roi-btn" id="reset1">Reset</button>
+        <button class="roi-btn" id="rotL1">⟲ Rotate -90°</button>
+        <button class="roi-btn" id="rotR1">Rotate +90° ⟳</button>
         <div style="margin-top:0.5rem">Detected candidates: <span id="cands1">-</span></div>
         <div style="margin-top:0.5rem">Auto-chosen score: <span id="auto1">-</span></div>
         <label class="inline">Manual override: <input type="number" id="manual1" placeholder="Enter score or blank"></label>
       </div>
     </div>
     <div class="col">
-      <h3>EW Score Sheet</h3>
+      <h3>Image 2</h3>
       <input type="file" id="file2" accept="image/*"><br><br>
       <canvas id="canvas2"></canvas>
       <div class="controls">
         <button class="roi-btn" id="startRoi2">Start ROI</button>
         <button class="roi-btn" id="crop2">Crop to ROI</button>
         <button class="roi-btn" id="reset2">Reset</button>
+        <button class="roi-btn" id="rotL2">⟲ Rotate -90°</button>
+        <button class="roi-btn" id="rotR2">Rotate +90° ⟳</button>
         <div style="margin-top:0.5rem">Detected candidates: <span id="cands2">-</span></div>
         <div style="margin-top:0.5rem">Auto-chosen score: <span id="auto2">-</span></div>
         <label class="inline">Manual override: <input type="number" id="manual2" placeholder="Enter score or blank"></label>
@@ -57,7 +63,33 @@
   <h3>Result</h3>
   <pre id="result">No result yet.</pre>
 
+  <h3>OCR Logs (debug)</h3>
+  <div id="logs">Logs will appear here...</div>
+
   <script>
+    // Basic debug helpers: capture global errors and unhandled rejections to the on-page logs
+    function appendLog(msg) {
+      const d = document.getElementById('logs');
+      const now = new Date().toISOString().substr(11,8);
+      d.textContent += `\n[${now}] ${msg}`;
+      d.scrollTop = d.scrollHeight;
+      console.log(msg);
+    }
+    window.addEventListener('error', function(ev) {
+      appendLog('GLOBAL ERROR: ' + (ev.message || ev.error || ev));
+    });
+    window.addEventListener('unhandledrejection', function(ev) {
+      appendLog('UNHANDLED REJECTION: ' + (ev.reason && ev.reason.message ? ev.reason.message : JSON.stringify(ev.reason)));
+    });
+
+    appendLog('Starting page — checking Tesseract...');
+    appendLog('Tesseract available? ' + (typeof Tesseract !== 'undefined'));
+    if (typeof Tesseract !== 'undefined') {
+      try { appendLog('Tesseract.version: ' + (Tesseract.version || 'unknown')); } catch(e) {}
+    } else {
+      appendLog('Warning: Tesseract not loaded. If OCR never runs, check network/CSP/extensions.');
+    }
+
     // Standard IMP table breakpoints (point <= max -> imps)
     const IMP_BREAKPOINTS = [
       [10,0],[40,1],[80,2],[120,3],[160,4],[210,5],[260,6],[310,7],[360,8],
@@ -74,13 +106,14 @@
     }
 
     // Load image into canvas with optional resizing and simple preprocessing (convert to grayscale + increase contrast)
+    const originalImages = { img1: null, img2: null };
     function drawFileToCanvas(file, canvas) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = e => {
           const img = new Image();
           img.onload = () => {
-            // Resize if too large
+            originalImages[canvas.id] = img; // store
             const maxDim = 1600;
             let w = img.width, h = img.height;
             const scale = Math.min(1, maxDim / Math.max(w, h));
@@ -90,22 +123,19 @@
             canvas.height = h;
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0, w, h);
-
-            // simple contrast increase + grayscale
-            const imgData = ctx.getImageData(0,0,w,h);
-            const d = imgData.data;
-            for (let i=0;i<d.length;i+=4) {
-              // grayscale
-              const gray = 0.3*d[i] + 0.59*d[i+1] + 0.11*d[i+2];
-              // enhance contrast
-              const c = Math.min(255, Math.max(0, (gray - 128) * 1.4 + 128));
-              d[i]=d[i+1]=d[i+2]=c;
-            }
-            ctx.putImageData(imgData,0,0);
-
+            try {
+              const imgData = ctx.getImageData(0,0,w,h);
+              const d = imgData.data;
+              for (let i=0;i<d.length;i+=4) {
+                const gray = 0.3*d[i] + 0.59*d[i+1] + 0.11*d[i+2];
+                const c = Math.min(255, Math.max(0, (gray - 128) * 1.4 + 128));
+                d[i]=d[i+1]=d[i+2]=c;
+              }
+              ctx.putImageData(imgData,0,0);
+            } catch (err) { appendLog('preprocess imageData failed: '+err.message); }
             resolve();
           };
-          img.onerror = reject;
+          img.onerror = err => reject(err);
           img.src = e.target.result;
         };
         reader.onerror = reject;
@@ -113,19 +143,65 @@
       });
     }
 
-    // OCR one canvas using Tesseract.js worker; restrict to digits and minus sign
-    async function ocrCanvas(canvas, worker) {
-      // Using psm 6 for a block of text
-      await worker.setParameters({
+    function rotateCanvas(canvas, degrees) {
+      const img = originalImages[canvas.id];
+      if (!img) return;
+      const maxDim = 1600;
+      let w = img.width, h = img.height;
+      const scale = Math.min(1, maxDim / Math.max(w, h));
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+      const tmp = document.createElement('canvas');
+      if (degrees % 180 === 0) { tmp.width = w; tmp.height = h; } else { tmp.width = h; tmp.height = w; }
+      const ctx = tmp.getContext('2d');
+      ctx.save(); ctx.translate(tmp.width/2, tmp.height/2); ctx.rotate(degrees * Math.PI / 180);
+      ctx.drawImage(img, -w/2, -h/2, w, h); ctx.restore();
+      canvas.width = tmp.width; canvas.height = tmp.height; const cctx = canvas.getContext('2d'); cctx.drawImage(tmp,0,0);
+    }
+
+    // OCR wrapper: add timeout and logging
+    async function ocrCanvasWithPSMRecognize(canvas, psm, timeoutMs = 30000) {
+      if (typeof Tesseract === 'undefined' || !Tesseract.recognize) {
+        throw new Error('Tesseract not available');
+      }
+      const config = {
         tessedit_char_whitelist: '0123456789-',
+        tessedit_pageseg_mode: String(psm),
         user_defined_dpi: '300'
-      });
-      const { data: { text } } = await worker.recognize(canvas);
-      return text;
+      };
+      appendLog(`Starting recognize psm=${psm}, timeout=${timeoutMs}ms`);
+      const task = Tesseract.recognize(canvas, 'eng', { logger: m => { if (m && m.status) appendLog(`tesseract:${m.status} ${m.progress?Math.round(m.progress*100)+'%':''}`); }, ...config });
+      const timer = new Promise((_, reject) => setTimeout(() => reject(new Error('OCR timeout')), timeoutMs));
+      try {
+        const res = await Promise.race([task, timer]);
+        const text = res && res.data && res.data.text ? res.data.text : '';
+        appendLog(`psm=${psm} finished, text length=${text.length}`);
+        return text;
+      } catch (err) {
+        appendLog(`psm=${psm} error: ${err.message}`);
+        throw err;
+      }
+    }
+
+    async function ocrTryMultiplePSM(canvas) {
+      const modes = [7,6,11]; // try single-line, block, sparse text
+      const allCandidates = new Set();
+      for (const m of modes) {
+        try {
+          appendLog('OCR try psm=' + m);
+          const t = await ocrCanvasWithPSMRecognize(canvas, m, 30000);
+          appendLog(`OCR psm=${m} result preview: "${(t||'').replace(/\n/g,' ').slice(0,200)}"`);
+          const ints = extractIntegers(t);
+          ints.forEach(i => allCandidates.add(i));
+        } catch (err) {
+          appendLog('OCR psm=' + m + ' failed: ' + (err.message || err));
+        }
+      }
+      return Array.from(allCandidates).sort((a,b)=>a-b);
     }
 
     function extractIntegers(text) {
-      const matches = text.match(/-?\d+/g);
+      const matches = text ? text.match(/-?\d+/g) : null;
       if (!matches) return [];
       return matches.map(s => parseInt(s,10)).filter(n => Number.isFinite(n));
     }
@@ -137,252 +213,64 @@
       return candidates[candidates.length-1];
     }
 
-    // ROI helper (enables drawing a rectangle on a canvas, returns {x,y,w,h})
+    // ROI helper (draw rectangle)
     function enableRoiSelection(canvas) {
-      let selecting = false;
-      let startX=0, startY=0, curX=0, curY=0;
-      const ctx = canvas.getContext('2d');
-      // We'll capture the current pixels to restore during drawing
-      let savedImage = null;
-
-      function onDown(e) {
-        selecting = true;
-        const rect = canvas.getBoundingClientRect();
-        startX = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
-        startY = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
-        savedImage = ctx.getImageData(0,0,canvas.width,canvas.height);
-      }
-      function onMove(e) {
-        if (!selecting) return;
-        const rect = canvas.getBoundingClientRect();
-        curX = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
-        curY = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
-        // restore
-        ctx.putImageData(savedImage,0,0);
-        // draw rect
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = Math.max(2, canvas.width/400);
-        ctx.strokeRect(Math.min(startX,curX), Math.min(startY,curY), Math.abs(curX-startX), Math.abs(curY-startY));
-      }
-      function onUp(e) {
-        if (!selecting) return;
-        selecting = false;
-        const rect = canvas.getBoundingClientRect();
-        curX = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
-        curY = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
-        // restore (leave rectangle drawn)
-        ctx.putImageData(savedImage,0,0);
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = Math.max(2, canvas.width/400);
-        ctx.strokeRect(Math.min(startX,curX), Math.min(startY,curY), Math.abs(curX-startX), Math.abs(curY-startY));
-      }
-
-      canvas.addEventListener('mousedown', onDown);
-      canvas.addEventListener('mousemove', onMove);
-      canvas.addEventListener('mouseup', onUp);
-
-      // Return a function that captures the last rectangle and disables handlers
-      function finalize() {
-        canvas.removeEventListener('mousedown', onDown);
-        canvas.removeEventListener('mousemove', onMove);
-        canvas.removeEventListener('mouseup', onUp);
-        const x = Math.min(startX, curX);
-        const y = Math.min(startY, curY);
-        const w = Math.abs(curX - startX);
-        const h = Math.abs(curY - startY);
-        return { x, y, w, h };
-      }
+      let selecting=false, startX=0, startY=0, curX=0, curY=0; const ctx = canvas.getContext('2d'); let saved=null;
+      function onDown(e){ selecting=true; const r=canvas.getBoundingClientRect(); startX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); startY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); try{ saved=ctx.getImageData(0,0,canvas.width,canvas.height);}catch(e){saved=null;} }
+      function onMove(e){ if(!selecting) return; const r=canvas.getBoundingClientRect(); curX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); curY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); if(saved) ctx.putImageData(saved,0,0); ctx.strokeStyle='red'; ctx.lineWidth=Math.max(2,canvas.width/400); ctx.strokeRect(Math.min(startX,curX),Math.min(startY,curY),Math.abs(curX-startX),Math.abs(curY-startY)); }
+      function onUp(e){ if(!selecting) return; selecting=false; const r=canvas.getBoundingClientRect(); curX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); curY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); if(saved) ctx.putImageData(saved,0,0); ctx.strokeStyle='red'; ctx.lineWidth=Math.max(2,canvas.width/400); ctx.strokeRect(Math.min(startX,curX),Math.min(startY,curY),Math.abs(curX-startX),Math.abs(curY-startY)); }
+      canvas.addEventListener('mousedown', onDown); canvas.addEventListener('mousemove', onMove); canvas.addEventListener('mouseup', onUp);
+      function finalize(){ canvas.removeEventListener('mousedown', onDown); canvas.removeEventListener('mousemove', onMove); canvas.removeEventListener('mouseup', onUp); const x=Math.min(startX,curX), y=Math.min(startY,curY), w=Math.abs(curX-startX), h=Math.abs(curY-startY); return {x,y,w,h}; }
       return { finalize };
     }
 
     function cropCanvasToRect(canvas, rect) {
-      if (!rect || rect.w <= 0 || rect.h <= 0) return canvas;
-      const tmp = document.createElement('canvas');
-      tmp.width = rect.w;
-      tmp.height = rect.h;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
-      // copy tmp back to original canvas
-      canvas.width = tmp.width;
-      canvas.height = tmp.height;
-      const originalCtx = canvas.getContext('2d');
-      originalCtx.drawImage(tmp, 0, 0);
-      return canvas;
+      if(!rect||rect.w<=0||rect.h<=0) return canvas; const tmp=document.createElement('canvas'); tmp.width=rect.w; tmp.height=rect.h; const ctx=tmp.getContext('2d'); ctx.drawImage(canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
+      const scaleUp=2; const scaled=document.createElement('canvas'); scaled.width=Math.round(tmp.width*scaleUp); scaled.height=Math.round(tmp.height*scaleUp); const sctx=scaled.getContext('2d'); sctx.imageSmoothingEnabled=true; sctx.drawImage(tmp,0,0,scaled.width,scaled.height); canvas.width=scaled.width; canvas.height=scaled.height; const octx=canvas.getContext('2d'); octx.drawImage(scaled,0,0); return canvas;
     }
 
-    // wire up file inputs and button
-    const file1 = document.getElementById('file1');
-    const file2 = document.getElementById('file2');
-    const canvas1 = document.getElementById('canvas1');
-    const canvas2 = document.getElementById('canvas2');
-    const runBtn = document.getElementById('runBtn');
-    const resultPre = document.getElementById('result');
-    const cands1Span = document.getElementById('cands1');
-    const cands2Span = document.getElementById('cands2');
-    const auto1Span = document.getElementById('auto1');
-    const auto2Span = document.getElementById('auto2');
-    const manual1 = document.getElementById('manual1');
-    const manual2 = document.getElementById('manual2');
+    // wire up elements
+    const file1=document.getElementById('file1'); const file2=document.getElementById('file2'); const canvas1=document.getElementById('canvas1'); const canvas2=document.getElementById('canvas2'); const runBtn=document.getElementById('runBtn'); const resultPre=document.getElementById('result'); const cands1Span=document.getElementById('cands1'); const cands2Span=document.getElementById('cands2'); const auto1Span=document.getElementById('auto1'); const auto2Span=document.getElementById('auto2'); const manual1=document.getElementById('manual1'); const manual2=document.getElementById('manual2');
 
-    let roiSelector1 = null;
-    let roiSelector2 = null;
+    let roiSelector1=null, roiSelector2=null;
+    document.getElementById('startRoi1').addEventListener('click', ()=>{ roiSelector1=enableRoiSelection(canvas1); resultPre.textContent='Draw rectangle on Image 1 then Crop.'; });
+    document.getElementById('startRoi2').addEventListener('click', ()=>{ roiSelector2=enableRoiSelection(canvas2); resultPre.textContent='Draw rectangle on Image 2 then Crop.'; });
+    document.getElementById('crop1').addEventListener('click', ()=>{ if(!roiSelector1){ resultPre.textContent='Click Start ROI for Image 1 first.'; return;} const rect=roiSelector1.finalize(); cropCanvasToRect(canvas1,rect); roiSelector1=null; resultPre.textContent='Cropped Image 1.'; });
+    document.getElementById('crop2').addEventListener('click', ()=>{ if(!roiSelector2){ resultPre.textContent='Click Start ROI for Image 2 first.'; return;} const rect=roiSelector2.finalize(); cropCanvasToRect(canvas2,rect); roiSelector2=null; resultPre.textContent='Cropped Image 2.'; });
+    document.getElementById('reset1').addEventListener('click', async ()=>{ if(file1.files[0]){ await drawFileToCanvas(file1.files[0],canvas1); cands1Span.textContent='-'; if(auto1Span) auto1Span.textContent='-'; manual1.value=''; resultPre.textContent='Image 1 reset.'; }});
+    document.getElementById('reset2').addEventListener('click', async ()=>{ if(file2.files[0]){ await drawFileToCanvas(file2.files[0],canvas2); cands2Span.textContent='-'; if(auto2Span) auto2Span.textContent='-'; manual2.value=''; resultPre.textContent='Image 2 reset.'; }});
+    document.getElementById('rotL1').addEventListener('click', ()=>rotateCanvas(canvas1,-90)); document.getElementById('rotR1').addEventListener('click', ()=>rotateCanvas(canvas1,90)); document.getElementById('rotL2').addEventListener('click', ()=>rotateCanvas(canvas2,-90)); document.getElementById('rotR2').addEventListener('click', ()=>rotateCanvas(canvas2,90));
 
-    document.getElementById('startRoi1').addEventListener('click', () => {
-      roiSelector1 = enableRoiSelection(canvas1);
-      resultPre.textContent = 'Draw a rectangle on Image 1 (mouse down, drag, release) to select ROI, then press Crop.';
-    });
-    document.getElementById('startRoi2').addEventListener('click', () => {
-      roiSelector2 = enableRoiSelection(canvas2);
-      resultPre.textContent = 'Draw a rectangle on Image 2 (mouse down, drag, release) to select ROI, then press Crop.';
-    });
+    file1.addEventListener('change', async ()=>{ if(file1.files[0]){ await drawFileToCanvas(file1.files[0], canvas1); cands1Span.textContent='-'; if(auto1Span) auto1Span.textContent='-'; manual1.value=''; }});
+    file2.addEventListener('change', async ()=>{ if(file2.files[0]){ await drawFileToCanvas(file2.files[0], canvas2); cands2Span.textContent='-'; if(auto2Span) auto2Span.textContent='-'; manual2.value=''; }});
 
-    document.getElementById('crop1').addEventListener('click', () => {
-      if (!roiSelector1) { resultPre.textContent = 'Click Start ROI for Image 1 first.'; return; }
-      const rect = roiSelector1.finalize();
-      cropCanvasToRect(canvas1, rect);
-      roiSelector1 = null;
-      resultPre.textContent = 'Cropped Image 1 to selected ROI.';
-    });
-    document.getElementById('crop2').addEventListener('click', () => {
-      if (!roiSelector2) { resultPre.textContent = 'Click Start ROI for Image 2 first.'; return; }
-      const rect = roiSelector2.finalize();
-      cropCanvasToRect(canvas2, rect);
-      roiSelector2 = null;
-      resultPre.textContent = 'Cropped Image 2 to selected ROI.';
-    });
+    // DEBUG: immediate feedback and safety checks
+    runBtn.addEventListener('click', async ()=>{
+      appendLog('Run button clicked');
+      if(!file1.files[0] || !file2.files[0]){ alert('Please choose both images.'); appendLog('Missing files'); return; }
+      if(typeof Tesseract === 'undefined') { appendLog('Tesseract is undefined on click'); alert('OCR library not loaded. See console/logs.'); return; }
+      resultPre.textContent='Running OCR (this may take some seconds)...';
+      try{
+        appendLog('Beginning OCR for image1');
+        const cands1 = await ocrTryMultiplePSM(canvas1);
+        appendLog('Image1 candidates: ' + JSON.stringify(cands1));
+        cands1Span.textContent = cands1.join(', ')||'-'; const score1Auto = chooseMostLikely(cands1); if(auto1Span) auto1Span.textContent = score1Auto===null?'-':score1Auto;
+        appendLog('Beginning OCR for image2');
+        const cands2 = await ocrTryMultiplePSM(canvas2);
+        appendLog('Image2 candidates: ' + JSON.stringify(cands2));
+        cands2Span.textContent = cands2.join(', ')||'-'; const score2Auto = chooseMostLikely(cands2); if(auto2Span) auto2Span.textContent = score2Auto===null?'-':score2Auto;
 
-    document.getElementById('reset1').addEventListener('click', async () => {
-      if (file1.files[0]) {
-        await drawFileToCanvas(file1.files[0], canvas1);
-        cands1Span.textContent = '-';
-        auto1Span.textContent = '-';
-        manual1.value = '';
-        resultPre.textContent = 'Image 1 reset.';
-      }
-    });
-    document.getElementById('reset2').addEventListener('click', async () => {
-      if (file2.files[0]) {
-        await drawFileToCanvas(file2.files[0], canvas2);
-        cands2Span.textContent = '-';
-        auto2Span.textContent = '-';
-        manual2.value = '';
-        resultPre.textContent = 'Image 2 reset.';
-      }
+        const score1Final = manual1 && manual1.value ? parseInt(manual1.value,10) : score1Auto;
+        const score2Final = manual2 && manual2.value ? parseInt(manual2.value,10) : score2Auto;
+        let out=''; out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`; out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`; out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`; out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`; out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`; out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
+        if(score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) { out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n'; }
+        else { const diff = score1Final - score2Final; const imps = pointsToImps(diff); out += `Point difference (img1 - img2): ${diff}\n`; out += `IMPs: ${imps}\n`; }
+        resultPre.textContent = out;
+      }catch(err){ appendLog('Run handler error: ' + (err && err.message?err.message:err)); resultPre.textContent='Error: ' + (err && err.message?err.message:err); }
     });
 
-    file1.addEventListener('change', async () => {
-      if (file1.files[0]) {
-        await drawFileToCanvas(file1.files[0], canvas1);
-        cands1Span.textContent = '-';
-        auto1Span.textContent = '-';
-        manual1.value = '';
-      }
-    });
-    file2.addEventListener('change', async () => {
-      if (file2.files[0]) {
-        await drawFileToCanvas(file2.files[0], canvas2);
-        cands2Span.textContent = '-';
-        auto2Span.textContent = '-';
-        manual2.value = '';
-      }
-    });
-
-  runBtn.addEventListener('click', async () => {
-  if (!file1.files[0] || !file2.files[0]) {
-    alert('Please choose both images.');
-    return;
-  }
-  log && log('Starting OCR (using Tesseract.recognize)...');
-  resultPre.textContent = 'Running OCR (this may take a few seconds)...';
-
-  try {
-    resultPre.textContent = 'Running OCR on image 1...';
-    const cands1 = await ocrTryMultiplePSM(canvas1);
-    cands1Span.textContent = cands1.join(', ') || '-';
-    const score1Auto = chooseMostLikely(cands1);
-    if (auto1Span) auto1Span.textContent = score1Auto === null ? '-' : score1Auto;
-
-    resultPre.textContent = 'Running OCR on image 2...';
-    const cands2 = await ocrTryMultiplePSM(canvas2);
-    cands2Span.textContent = cands2.join(', ') || '-';
-    const score2Auto = chooseMostLikely(cands2);
-    if (auto2Span) auto2Span.textContent = score2Auto === null ? '-' : score2Auto;
-
-    // Determine final scores: manual override takes precedence
-    const score1Final = manual1 && manual1.value ? parseInt(manual1.value, 10) : score1Auto;
-    const score2Final = manual2 && manual2.value ? parseInt(manual2.value, 10) : score2Auto;
-
-    let out = '';
-    out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`;
-    out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`;
-    out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`;
-    out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`;
-    out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`;
-    out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
-
-    if (score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) {
-      out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n';
-    } else {
-      const diff = score1Final - score2Final;
-      const imps = pointsToImps(diff);
-      out += `Point difference (img1 - img2): ${diff}\n`;
-      out += `IMPs: ${imps}\n`;
-    }
-    resultPre.textContent = out;
-  } catch (err) {
-    console.error(err);
-    resultPre.textContent = 'Error: ' + (err.message || err);
-    log && log('Error: ' + (err.message || err));
-  }
-});
-
-  try {
-    resultPre.textContent = 'Running OCR on image 1...';
-    // try PSM 7 then 6 and collect integers
-    const t1a = await ocrRecognizeTryPSM(canvas1, 7);
-    const t1b = await ocrRecognizeTryPSM(canvas1, 6);
-    log('OCR image1 results: ' + [t1a.replace(/\n/g,' '), t1b.replace(/\n/g,' ')].join(' | '));
-    const cands1 = Array.from(new Set([...(extractIntegers(t1a)), ...(extractIntegers(t1b))])).sort((a,b)=>a-b);
-    cands1Span.textContent = cands1.join(', ') || '-';
-    const score1Auto = chooseMostLikely(cands1);
-    auto1Span.textContent = score1Auto === null ? '-' : score1Auto;
-
-    resultPre.textContent = 'Running OCR on image 2...';
-    const t2a = await ocrRecognizeTryPSM(canvas2, 7);
-    const t2b = await ocrRecognizeTryPSM(canvas2, 6);
-    log('OCR image2 results: ' + [t2a.replace(/\n/g,' '), t2b.replace(/\n/g,' ')].join(' | '));
-    const cands2 = Array.from(new Set([...(extractIntegers(t2a)), ...(extractIntegers(t2b))])).sort((a,b)=>a-b);
-    cands2Span.textContent = cands2.join(', ') || '-';
-    const score2Auto = chooseMostLikely(cands2);
-    auto2Span.textContent = score2Auto === null ? '-' : score2Auto;
-
-    // Determine final scores: manual override takes precedence
-    const score1Final = manual1.value ? parseInt(manual1.value, 10) : score1Auto;
-    const score2Final = manual2.value ? parseInt(manual2.value, 10) : score2Auto;
-
-    let out = '';
-    out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`;
-    out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`;
-    out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`;
-    out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`;
-    out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`;
-    out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
-
-    if (score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) {
-      out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n';
-    } else {
-      const diff = score1Final - score2Final;
-      const imps = pointsToImps(diff);
-      out += `Point difference (img1 - img2): ${diff}\n`;
-      out += `IMPs: ${imps}\n`;
-    }
-    resultPre.textContent = out;
-  } catch (err) {
-    console.error(err);
-    resultPre.textContent = 'Error: ' + (err.message || err);
-    log('Error: ' + (err.message || err));
-  }
-});
+    // Expose helpers for console debugging
+    window._debug = { ocrTryMultiplePSM, ocrCanvasWithPSMRecognize, appendLog };
   </script>
 </body>
 </html>
