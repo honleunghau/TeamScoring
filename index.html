@@ -287,60 +287,78 @@
       }
     });
 
-    runBtn.addEventListener('click', async () => {
-      if (!file1.files[0] || !file2.files[0]) {
-        alert('Please choose both images.');
-        return;
-      }
-      resultPre.textContent = 'Loading OCR engine (this may take a few seconds)...';
-      const worker = Tesseract.createWorker({ logger: m => {} });
-      try {
-        await worker.load();
-        await worker.loadLanguage('eng');
-        await worker.initialize('eng');
+   runBtn.addEventListener('click', async () => {
+  if (!file1.files[0] || !file2.files[0]) {
+    alert('Please choose both images.');
+    return;
+  }
+  log('Starting OCR (using Tesseract.recognize)...');
+  resultPre.textContent = 'Running OCR (this may take a few seconds)...';
 
-        resultPre.textContent = 'Running OCR on image 1...';
-        const text1 = await ocrCanvas(canvas1, worker);
-        const cands1 = extractIntegers(text1);
-        cands1Span.textContent = cands1.join(', ') || '-';
-        const score1Auto = chooseMostLikely(cands1);
-        auto1Span.textContent = score1Auto === null ? '-' : score1Auto;
+  async function ocrRecognizeTryPSM(canvas, psm) {
+    try {
+      // pass config: psm and char whitelist
+      const options = {
+        tessedit_char_whitelist: '0123456789-',
+        tessedit_pageseg_mode: String(psm),
+        user_defined_dpi: '300'
+      };
+      // Tesseract.recognize(image, lang, options). It returns { data: { text, ... } }
+      const res = await Tesseract.recognize(canvas, 'eng', { logger: (m) => log(`tesseract: ${m.status || ''} ${m.progress ? '('+Math.round(m.progress*100)+'%)' : ''}`), ...options });
+      return res.data.text || '';
+    } catch (err) {
+      log('recognize error psm=' + psm + ': ' + (err.message || err));
+      return '';
+    }
+  }
 
-        resultPre.textContent = 'Running OCR on image 2...';
-        const text2 = await ocrCanvas(canvas2, worker);
-        const cands2 = extractIntegers(text2);
-        cands2Span.textContent = cands2.join(', ') || '-';
-        const score2Auto = chooseMostLikely(cands2);
-        auto2Span.textContent = score2Auto === null ? '-' : score2Auto;
+  try {
+    resultPre.textContent = 'Running OCR on image 1...';
+    // try PSM 7 then 6 and collect integers
+    const t1a = await ocrRecognizeTryPSM(canvas1, 7);
+    const t1b = await ocrRecognizeTryPSM(canvas1, 6);
+    log('OCR image1 results: ' + [t1a.replace(/\n/g,' '), t1b.replace(/\n/g,' ')].join(' | '));
+    const cands1 = Array.from(new Set([...(extractIntegers(t1a)), ...(extractIntegers(t1b))])).sort((a,b)=>a-b);
+    cands1Span.textContent = cands1.join(', ') || '-';
+    const score1Auto = chooseMostLikely(cands1);
+    auto1Span.textContent = score1Auto === null ? '-' : score1Auto;
 
-        // Determine final scores: manual override takes precedence
-        const score1Final = manual1.value ? parseInt(manual1.value, 10) : score1Auto;
-        const score2Final = manual2.value ? parseInt(manual2.value, 10) : score2Auto;
+    resultPre.textContent = 'Running OCR on image 2...';
+    const t2a = await ocrRecognizeTryPSM(canvas2, 7);
+    const t2b = await ocrRecognizeTryPSM(canvas2, 6);
+    log('OCR image2 results: ' + [t2a.replace(/\n/g,' '), t2b.replace(/\n/g,' ')].join(' | '));
+    const cands2 = Array.from(new Set([...(extractIntegers(t2a)), ...(extractIntegers(t2b))])).sort((a,b)=>a-b);
+    cands2Span.textContent = cands2.join(', ') || '-';
+    const score2Auto = chooseMostLikely(cands2);
+    auto2Span.textContent = score2Auto === null ? '-' : score2Auto;
 
-        let out = '';
-        out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`;
-        out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`;
-        out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`;
-        out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`;
-        out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`;
-        out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
+    // Determine final scores: manual override takes precedence
+    const score1Final = manual1.value ? parseInt(manual1.value, 10) : score1Auto;
+    const score2Final = manual2.value ? parseInt(manual2.value, 10) : score2Auto;
 
-        if (score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) {
-          out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n';
-        } else {
-          const diff = score1Final - score2Final;
-          const imps = pointsToImps(diff);
-          out += `Point difference (img1 - img2): ${diff}\n`;
-          out += `IMPs: ${imps}\n`;
-        }
-        resultPre.textContent = out;
-      } catch (err) {
-        console.error(err);
-        resultPre.textContent = 'Error: ' + (err.message || err);
-      } finally {
-        await worker.terminate();
-      }
-    });
+    let out = '';
+    out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`;
+    out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`;
+    out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`;
+    out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`;
+    out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`;
+    out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
+
+    if (score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) {
+      out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n';
+    } else {
+      const diff = score1Final - score2Final;
+      const imps = pointsToImps(diff);
+      out += `Point difference (img1 - img2): ${diff}\n`;
+      out += `IMPs: ${imps}\n`;
+    }
+    resultPre.textContent = out;
+  } catch (err) {
+    console.error(err);
+    resultPre.textContent = 'Error: ' + (err.message || err);
+    log('Error: ' + (err.message || err));
+  }
+});
   </script>
 </body>
 </html>
