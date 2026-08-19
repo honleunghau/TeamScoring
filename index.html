@@ -287,30 +287,54 @@
       }
     });
 
-   runBtn.addEventListener('click', async () => {
+  runBtn.addEventListener('click', async () => {
   if (!file1.files[0] || !file2.files[0]) {
     alert('Please choose both images.');
     return;
   }
-  log('Starting OCR (using Tesseract.recognize)...');
+  log && log('Starting OCR (using Tesseract.recognize)...');
   resultPre.textContent = 'Running OCR (this may take a few seconds)...';
 
-  async function ocrRecognizeTryPSM(canvas, psm) {
-    try {
-      // pass config: psm and char whitelist
-      const options = {
-        tessedit_char_whitelist: '0123456789-',
-        tessedit_pageseg_mode: String(psm),
-        user_defined_dpi: '300'
-      };
-      // Tesseract.recognize(image, lang, options). It returns { data: { text, ... } }
-      const res = await Tesseract.recognize(canvas, 'eng', { logger: (m) => log(`tesseract: ${m.status || ''} ${m.progress ? '('+Math.round(m.progress*100)+'%)' : ''}`), ...options });
-      return res.data.text || '';
-    } catch (err) {
-      log('recognize error psm=' + psm + ': ' + (err.message || err));
-      return '';
+  try {
+    resultPre.textContent = 'Running OCR on image 1...';
+    const cands1 = await ocrTryMultiplePSM(canvas1);
+    cands1Span.textContent = cands1.join(', ') || '-';
+    const score1Auto = chooseMostLikely(cands1);
+    if (auto1Span) auto1Span.textContent = score1Auto === null ? '-' : score1Auto;
+
+    resultPre.textContent = 'Running OCR on image 2...';
+    const cands2 = await ocrTryMultiplePSM(canvas2);
+    cands2Span.textContent = cands2.join(', ') || '-';
+    const score2Auto = chooseMostLikely(cands2);
+    if (auto2Span) auto2Span.textContent = score2Auto === null ? '-' : score2Auto;
+
+    // Determine final scores: manual override takes precedence
+    const score1Final = manual1 && manual1.value ? parseInt(manual1.value, 10) : score1Auto;
+    const score2Final = manual2 && manual2.value ? parseInt(manual2.value, 10) : score2Auto;
+
+    let out = '';
+    out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`;
+    out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`;
+    out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`;
+    out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`;
+    out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`;
+    out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
+
+    if (score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) {
+      out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n';
+    } else {
+      const diff = score1Final - score2Final;
+      const imps = pointsToImps(diff);
+      out += `Point difference (img1 - img2): ${diff}\n`;
+      out += `IMPs: ${imps}\n`;
     }
+    resultPre.textContent = out;
+  } catch (err) {
+    console.error(err);
+    resultPre.textContent = 'Error: ' + (err.message || err);
+    log && log('Error: ' + (err.message || err));
   }
+});
 
   try {
     resultPre.textContent = 'Running OCR on image 1...';
