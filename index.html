@@ -126,13 +126,94 @@
 
     // OCR one canvas using Tesseract.js worker; restrict to digits and minus sign
     async function ocrCanvas(canvas, worker) {
-      // Using psm 6 for a block of text
-      await worker.setParameters({
-        tessedit_char_whitelist: '0123456789-',
-        user_defined_dpi: '300'
-      });
-      const { data: { text } } = await worker.recognize(canvas);
-      return text;
+      // Helper: create an upsampled + (optionally inverted) binarized canvas from source
+      function makePreprocessed(src, scale=2, invert=false) {
+        const W = Math.max(200, Math.round(src.width * scale));
+        const H = Math.max(40, Math.round(src.height * scale));
+        const tmp = document.createElement('canvas');
+        tmp.width = W; tmp.height = H;
+        const ctx = tmp.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(src, 0, 0, W, H);
+        const id = ctx.getImageData(0,0,W,H);
+        // grayscale
+        for (let i=0;i<id.data.length;i+=4) {
+          const g = 0.299*id.data[i] + 0.587*id.data[i+1] + 0.114*id.data[i+2];
+          id.data[i]=id.data[i+1]=id.data[i+2]=g;
+        }
+        // simple adaptive threshold (fast mean window)
+        const out = new Uint8ClampedArray(id.data.length);
+        const w = W, h = H, win = Math.floor(Math.max(5, Math.min(w,h)/16));
+        for (let y=0;y<h;y++) {
+          for (let x=0;x<w;x++) {
+            // neighborhood mean
+            let sum=0, count=0;
+            const y0 = Math.max(0, y-win), y1 = Math.min(h-1, y+win);
+            const x0 = Math.max(0, x-win), x1 = Math.min(w-1, x+win);
+            for (let yy=y0; yy<=y1; yy++) {
+              for (let xx=x0; xx<=x1; xx++) {
+                sum += id.data[(yy*w+xx)*4];
+                count++;
+              }
+            }
+            const mean = sum/count;
+            const i = (y*w+x)*4;
+            let v = id.data[i] < mean*0.95 ? 0 : 255;
+            if (invert) v = 255 - v;
+            out[i]=out[i+1]=out[i+2]=v; out[i+3]=255;
+          }
+        }
+        const id2 = new ImageData(out, W, H);
+        ctx.putImageData(id2, 0, 0);
+        return tmp;
+      }
+
+      // Try several preprocessing variants and PSMs and pick best numeric result
+      const psmList = [7, 8, 6, 11];
+      const preprocessVariants = [
+        () => makePreprocessed(canvas, 2, false),
+        () => makePreprocessed(canvas, 3, false),
+        () => makePreprocessed(canvas, 2, true),
+        () => makePreprocessed(canvas, 3, true)
+      ];
+
+      // Set common parameters (whitelist + DPI) if supported
+      try {
+        await worker.setParameters({
+          tessedit_char_whitelist: '0123456789-',
+          user_defined_dpi: '300'
+        });
+      } catch (e) {
+        // ignore if not supported by this build
+      }
+
+      let bestText = '';
+      let bestScore = -1; // number-of-digit-chars heuristic
+      for (const makeCanvas of preprocessVariants) {
+        const testCanvas = makeCanvas();
+        for (const psm of psmList) {
+          try {
+            let res;
+            // prefer calling recognize with options as 2nd arg when supported
+            try {
+              res = await worker.recognize(testCanvas, { tessedit_pageseg_mode: String(psm) });
+            } catch (e) {
+              // fallback to older signature
+              res = await worker.recognize(testCanvas, 'eng', { tessedit_pageseg_mode: String(psm) });
+            }
+            const text = (res && res.data && res.data.text) ? res.data.text : (res && res.text) ? res.text : '';
+            const digits = (text.match(/-?\d+/g) || []).join('');
+            const score = digits.length;
+            if (score > bestScore) { bestScore = score; bestText = text; }
+            // if we found a reasonably long digit result, stop early for this variant
+            if (score >= 3) break;
+          } catch (err) {
+            // ignore and continue
+            console.warn('recognize error', err);
+          }
+        }
+      }
+      return bestText;
     }
 
     function extractIntegers(text) {
