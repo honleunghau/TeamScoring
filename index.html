@@ -5,7 +5,7 @@
   <title>Bridge Score Compare</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: Arial, sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; }
     .row { display:flex; gap:1rem; align-items:flex-start; flex-wrap:wrap; }
     .col { flex:1; min-width:280px; }
     canvas { border:1px solid #ccc; max-width:100%; height:auto; }
@@ -15,6 +15,9 @@
     .roi-btn { margin-right:0.5rem; }
     label.inline { display:inline-block; margin-right:1rem; }
     #logs { background:#111; color:#0f0; padding:10px; max-height:220px; overflow:auto; font-family: monospace; white-space:pre-wrap }
+    table { border-collapse: collapse; width:100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align:left; }
+    tr.mismatch { background:#ffecec; }
   </style>
   <!-- Use jsDelivr which is often more reliable than unpkg for tesseract files -->
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
@@ -63,11 +66,14 @@
   <h3>Result</h3>
   <pre id="result">No result yet.</pre>
 
+  <h3>Board-by-board Comparison</h3>
+  <div id="compareResult">No comparison yet.</div>
+
   <h3>OCR Logs (debug)</h3>
   <div id="logs">Logs will appear here...</div>
 
   <script>
-    // Basic debug helpers: capture global errors and unhandled rejections to the on-page logs
+    // Basic debug helpers
     function appendLog(msg) {
       const d = document.getElementById('logs');
       const now = new Date().toISOString().substr(11,8);
@@ -75,163 +81,42 @@
       d.scrollTop = d.scrollHeight;
       console.log(msg);
     }
-    window.addEventListener('error', function(ev) {
-      appendLog('GLOBAL ERROR: ' + (ev.message || ev.error || ev));
-    });
-    window.addEventListener('unhandledrejection', function(ev) {
-      appendLog('UNHANDLED REJECTION: ' + (ev.reason && ev.reason.message ? ev.reason.message : JSON.stringify(ev.reason)));
-    });
+    window.addEventListener('error', function(ev) { appendLog('GLOBAL ERROR: ' + (ev.message || ev.error || ev)); });
+    window.addEventListener('unhandledrejection', function(ev) { appendLog('UNHANDLED REJECTION: ' + (ev.reason && ev.reason.message ? ev.reason.message : JSON.stringify(ev.reason))); });
 
     appendLog('Starting page — checking Tesseract...');
     appendLog('Tesseract available? ' + (typeof Tesseract !== 'undefined'));
-    if (typeof Tesseract !== 'undefined') {
-      try { appendLog('Tesseract.version: ' + (Tesseract.version || 'unknown')); } catch(e) {}
-    } else {
-      appendLog('Warning: Tesseract not loaded. If OCR never runs, check network/CSP/extensions.');
-    }
 
-    // Standard IMP table breakpoints (point <= max -> imps)
-    const IMP_BREAKPOINTS = [
-      [10,0],[40,1],[80,2],[120,3],[160,4],[210,5],[260,6],[310,7],[360,8],
-      [420,9],[490,10],[590,11],[740,12],[890,13],[1090,14],[1290,15],[1490,16],
-      [1740,17],[1990,18],[2240,19],[2490,20],[2990,21],[3490,22],[3990,23],[Infinity,24]
-    ];
+    // IMP table
+    const IMP_BREAKPOINTS = [[10,0],[40,1],[80,2],[120,3],[160,4],[210,5],[260,6],[310,7],[360,8],[420,9],[490,10],[590,11],[740,12],[890,13],[1090,14],[1290,15],[1490,16],[1740,17],[1990,18],[2240,19],[2490,20],[2990,21],[3490,22],[3990,23],[Infinity,24]];
+    function pointsToImps(diff){ diff = Math.abs(diff); for(const [maxp,imps] of IMP_BREAKPOINTS) if(diff<=maxp) return imps; return 24; }
 
-    function pointsToImps(diff) {
-      diff = Math.abs(diff);
-      for (const [maxp, imps] of IMP_BREAKPOINTS) {
-        if (diff <= maxp) return imps;
-      }
-      return 24;
-    }
-
-    // Load image into canvas with optional resizing and simple preprocessing (convert to grayscale + increase contrast)
+    // Image loading + preprocessing
     const originalImages = { img1: null, img2: null };
-    function drawFileToCanvas(file, canvas) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = e => {
-          const img = new Image();
-          img.onload = () => {
-            originalImages[canvas.id] = img; // store
-            const maxDim = 1600;
-            let w = img.width, h = img.height;
-            const scale = Math.min(1, maxDim / Math.max(w, h));
-            w = Math.round(w * scale);
-            h = Math.round(h * scale);
-            canvas.width = w;
-            canvas.height = h;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, w, h);
-            try {
-              const imgData = ctx.getImageData(0,0,w,h);
-              const d = imgData.data;
-              for (let i=0;i<d.length;i+=4) {
-                const gray = 0.3*d[i] + 0.59*d[i+1] + 0.11*d[i+2];
-                const c = Math.min(255, Math.max(0, (gray - 128) * 1.4 + 128));
-                d[i]=d[i+1]=d[i+2]=c;
-              }
-              ctx.putImageData(imgData,0,0);
-            } catch (err) { appendLog('preprocess imageData failed: '+err.message); }
-            resolve();
-          };
-          img.onerror = err => reject(err);
-          img.src = e.target.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+    function drawFileToCanvas(file, canvas){ return new Promise((resolve,reject)=>{ const reader=new FileReader(); reader.onload=e=>{ const img=new Image(); img.onload=()=>{ originalImages[canvas.id]=img; const maxDim=1600; let w=img.width,h=img.height; const scale=Math.min(1,maxDim/Math.max(w,h)); w=Math.round(w*scale); h=Math.round(h*scale); canvas.width=w; canvas.height=h; const ctx=canvas.getContext('2d'); ctx.drawImage(img,0,0,w,h); try{ const imgData=ctx.getImageData(0,0,w,h); const d=imgData.data; for(let i=0;i<d.length;i+=4){ const gray=0.3*d[i]+0.59*d[i+1]+0.11*d[i+2]; const c=Math.min(255,Math.max(0,(gray-128)*1.4+128)); d[i]=d[i+1]=d[i+2]=c; } ctx.putImageData(imgData,0,0);}catch(err){ appendLog('preprocess imageData failed: '+err.message);} resolve(); }; img.onerror=err=>reject(err); img.src=e.target.result; }; reader.onerror=reject; reader.readAsDataURL(file); }); }
+    function rotateCanvas(canvas,degrees){ const img=originalImages[canvas.id]; if(!img) return; const maxDim=1600; let w=img.width,h=img.height; const scale=Math.min(1,maxDim/Math.max(w,h)); w=Math.round(w*scale); h=Math.round(h*scale); const tmp=document.createElement('canvas'); if(degrees%180===0){ tmp.width=w; tmp.height=h; } else { tmp.width=h; tmp.height=w; } const ctx=tmp.getContext('2d'); ctx.save(); ctx.translate(tmp.width/2,tmp.height/2); ctx.rotate(degrees*Math.PI/180); ctx.drawImage(img,-w/2,-h/2,w,h); ctx.restore(); canvas.width=tmp.width; canvas.height=tmp.height; const cctx=canvas.getContext('2d'); cctx.drawImage(tmp,0,0); }
+
+    // OCR helpers (recognize with timeout and logging)
+    async function ocrCanvasWithPSMRecognize(canvas, psm, timeoutMs=30000){ if(typeof Tesseract==='undefined' || !Tesseract.recognize) throw new Error('Tesseract not available'); const config={ tessedit_char_whitelist:'0123456789-NTnshdscSHDN', tessedit_pageseg_mode:String(psm), user_defined_dpi:'300' }; appendLog(`Starting recognize psm=${psm}, timeout=${timeoutMs}ms`); const task=Tesseract.recognize(canvas,'eng',{ logger: m => { if(m && m.status) appendLog(`tesseract:${m.status} ${m.progress?Math.round(m.progress*100)+'%':''}`); }, ...config }); const timer=new Promise((_,reject)=>setTimeout(()=>reject(new Error('OCR timeout')), timeoutMs)); const res = await Promise.race([task,timer]); const text = res && res.data && res.data.text ? res.data.text : ''; appendLog(`psm=${psm} finished, text length=${text.length}`); return text; }
+    async function runFullOCRText(canvas){ // try multiple PSMs and combine text
+      let out=''; const modes=[6,7,11]; for(const m of modes){ try{ const t = await ocrCanvasWithPSMRecognize(canvas,m,30000); if(t && t.trim()) out += '\n' + t; } catch(e){ appendLog('fullOCR psm='+m+' failed: '+e.message); } } return out.trim(); }
+
+    function extractIntegers(text){ const matches = text ? text.match(/-?\d+/g) : null; if(!matches) return []; return matches.map(s=>parseInt(s,10)).filter(n=>Number.isFinite(n)); }
+    function chooseMostLikely(candidates){ if(!candidates||candidates.length===0) return null; const positives=candidates.filter(n=>n>0&&Math.abs(n)<100000); if(positives.length) return Math.max(...positives); return candidates[candidates.length-1]; }
+
+    // Parser and comparer (from spec)
+    function parseScoreSheet(text){ if(!text) return []; const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean); const rows=[]; for(const raw of lines){ const line = raw.replace(/\t+/g,' ').replace(/\s{2,}/g,' ').trim(); const ints = (line.match(/-?\d+/g) || []).map(s=>parseInt(s,10)); if(ints.length < 2) continue; const ew = ints[ints.length-1]; const ns = ints[ints.length-2]; let board = null; const boardMatch = line.match(/\b([1-9][0-9]{0,2})\b/); if(boardMatch) board = parseInt(boardMatch[1],10); const contractMatch = line.match(/\b([1-7])\s*(NT|N|H|S|D|C|♠|♥|♦|♣)\b/i); const contract = contractMatch ? (contractMatch[1] + (contractMatch[2].toUpperCase())) : ''; const declarerMatch = line.match(/\b(North|South|East|West|N|S|E|W)\b/i); let declarer = declarerMatch ? declarerMatch[0].toUpperCase() : ''; if(declarer && declarer.length>1) declarer = declarer[0]; const vulnMatch = line.match(/\b(None|NS|N\/S|N-S|EW|E\/W|E-W|All|Both|Vul|Vulnerability)\b/i); let vulnerability = vulnMatch ? vulnMatch[1] : ''; if(vulnerability) vulnerability = vulnerability.replace(/\//g,'-'); const allInts = (line.match(/\b[0-9]{1,2}\b/g) || []).map(s=>parseInt(s,10)); let tricks = ''; if(allInts.length){ let clueInts = allInts.slice(); while(clueInts.length>=1 && (clueInts[clueInts.length-1]===ew || clueInts[clueInts.length-1]===ns)) clueInts.pop(); for(let i=clueInts.length-1;i>=0;--i){ const v=clueInts[i]; if(v>=0&&v<=13&&v!==board){ tricks = v; break; } } }
+      if(board===null) continue; rows.push({ board, vulnerability: vulnerability||'', contract: contract||'', declarer: declarer||'', tricks: tricks!==''?tricks:'', ns, ew, rawLine: raw }); }
+      const seen = new Map(); for(const r of rows){ if(!seen.has(r.board)) seen.set(r.board,r); } return Array.from(seen.values()).sort((a,b)=>a.board-b.board);
     }
 
-    function rotateCanvas(canvas, degrees) {
-      const img = originalImages[canvas.id];
-      if (!img) return;
-      const maxDim = 1600;
-      let w = img.width, h = img.height;
-      const scale = Math.min(1, maxDim / Math.max(w, h));
-      w = Math.round(w * scale);
-      h = Math.round(h * scale);
-      const tmp = document.createElement('canvas');
-      if (degrees % 180 === 0) { tmp.width = w; tmp.height = h; } else { tmp.width = h; tmp.height = w; }
-      const ctx = tmp.getContext('2d');
-      ctx.save(); ctx.translate(tmp.width/2, tmp.height/2); ctx.rotate(degrees * Math.PI / 180);
-      ctx.drawImage(img, -w/2, -h/2, w, h); ctx.restore();
-      canvas.width = tmp.width; canvas.height = tmp.height; const cctx = canvas.getContext('2d'); cctx.drawImage(tmp,0,0);
-    }
+    function compareSheets(sheetA,sheetB){ const mapA=new Map(); sheetA.forEach(r=>mapA.set(r.board,r)); const mapB=new Map(); sheetB.forEach(r=>mapB.set(r.board,r)); const allBoards=new Set([...mapA.keys(),...mapB.keys()]); const results=[]; for(const board of Array.from(allBoards).sort((a,b)=>a-b)){ const a=mapA.get(board)||null; const b=mapB.get(board)||null; const diffNS = (a&&b)?(a.ns - b.ns):null; const diffEW = (a&&b)?(a.ew - b.ew):null; const mismatch = (a&&b)?(a.ns !== b.ns || a.ew !== b.ew): true; results.push({ board, sheetA: a, sheetB: b, mismatch, diffNS, diffEW }); } return results; }
 
-    // OCR wrapper: add timeout and logging
-    async function ocrCanvasWithPSMRecognize(canvas, psm, timeoutMs = 30000) {
-      if (typeof Tesseract === 'undefined' || !Tesseract.recognize) {
-        throw new Error('Tesseract not available');
-      }
-      const config = {
-        tessedit_char_whitelist: '0123456789-',
-        tessedit_pageseg_mode: String(psm),
-        user_defined_dpi: '300'
-      };
-      appendLog(`Starting recognize psm=${psm}, timeout=${timeoutMs}ms`);
-      const task = Tesseract.recognize(canvas, 'eng', { logger: m => { if (m && m.status) appendLog(`tesseract:${m.status} ${m.progress?Math.round(m.progress*100)+'%':''}`); }, ...config });
-      const timer = new Promise((_, reject) => setTimeout(() => reject(new Error('OCR timeout')), timeoutMs));
-      try {
-        const res = await Promise.race([task, timer]);
-        const text = res && res.data && res.data.text ? res.data.text : '';
-        appendLog(`psm=${psm} finished, text length=${text.length}`);
-        return text;
-      } catch (err) {
-        appendLog(`psm=${psm} error: ${err.message}`);
-        throw err;
-      }
-    }
-
-    async function ocrTryMultiplePSM(canvas) {
-      const modes = [7,6,11]; // try single-line, block, sparse text
-      const allCandidates = new Set();
-      for (const m of modes) {
-        try {
-          appendLog('OCR try psm=' + m);
-          const t = await ocrCanvasWithPSMRecognize(canvas, m, 30000);
-          appendLog(`OCR psm=${m} result preview: "${(t||'').replace(/\n/g,' ').slice(0,200)}"`);
-          const ints = extractIntegers(t);
-          ints.forEach(i => allCandidates.add(i));
-        } catch (err) {
-          appendLog('OCR psm=' + m + ' failed: ' + (err.message || err));
-        }
-      }
-      return Array.from(allCandidates).sort((a,b)=>a-b);
-    }
-
-    function extractIntegers(text) {
-      const matches = text ? text.match(/-?\d+/g) : null;
-      if (!matches) return [];
-      return matches.map(s => parseInt(s,10)).filter(n => Number.isFinite(n));
-    }
-
-    function chooseMostLikely(candidates) {
-      if (!candidates || candidates.length===0) return null;
-      const positives = candidates.filter(n => n>0 && Math.abs(n) < 100000);
-      if (positives.length) return Math.max(...positives);
-      return candidates[candidates.length-1];
-    }
-
-    // ROI helper (draw rectangle)
-    function enableRoiSelection(canvas) {
-      let selecting=false, startX=0, startY=0, curX=0, curY=0; const ctx = canvas.getContext('2d'); let saved=null;
-      function onDown(e){ selecting=true; const r=canvas.getBoundingClientRect(); startX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); startY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); try{ saved=ctx.getImageData(0,0,canvas.width,canvas.height);}catch(e){saved=null;} }
-      function onMove(e){ if(!selecting) return; const r=canvas.getBoundingClientRect(); curX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); curY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); if(saved) ctx.putImageData(saved,0,0); ctx.strokeStyle='red'; ctx.lineWidth=Math.max(2,canvas.width/400); ctx.strokeRect(Math.min(startX,curX),Math.min(startY,curY),Math.abs(curX-startX),Math.abs(curY-startY)); }
-      function onUp(e){ if(!selecting) return; selecting=false; const r=canvas.getBoundingClientRect(); curX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); curY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); if(saved) ctx.putImageData(saved,0,0); ctx.strokeStyle='red'; ctx.lineWidth=Math.max(2,canvas.width/400); ctx.strokeRect(Math.min(startX,curX),Math.min(startY,curY),Math.abs(curX-startX),Math.abs(curY-startY)); }
-      canvas.addEventListener('mousedown', onDown); canvas.addEventListener('mousemove', onMove); canvas.addEventListener('mouseup', onUp);
-      function finalize(){ canvas.removeEventListener('mousedown', onDown); canvas.removeEventListener('mousemove', onMove); canvas.removeEventListener('mouseup', onUp); const x=Math.min(startX,curX), y=Math.min(startY,curY), w=Math.abs(curX-startX), h=Math.abs(curY-startY); return {x,y,w,h}; }
-      return { finalize };
-    }
-
-    function cropCanvasToRect(canvas, rect) {
-      if(!rect||rect.w<=0||rect.h<=0) return canvas; const tmp=document.createElement('canvas'); tmp.width=rect.w; tmp.height=rect.h; const ctx=tmp.getContext('2d'); ctx.drawImage(canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
-      const scaleUp=2; const scaled=document.createElement('canvas'); scaled.width=Math.round(tmp.width*scaleUp); scaled.height=Math.round(tmp.height*scaleUp); const sctx=scaled.getContext('2d'); sctx.imageSmoothingEnabled=true; sctx.drawImage(tmp,0,0,scaled.width,scaled.height); canvas.width=scaled.width; canvas.height=scaled.height; const octx=canvas.getContext('2d'); octx.drawImage(scaled,0,0); return canvas;
-    }
+    // UI helpers for comparison display
+    function renderComparison(report){ const outDiv = document.getElementById('compareResult'); if(!report || report.length===0){ outDiv.innerHTML = '<i>No parsed boards found.</i>'; return; } let html = '<table><thead><tr><th>Board</th><th>Sheet A (NS / EW)</th><th>Sheet B (NS / EW)</th><th>Difference (NS)</th><th>Difference (EW)</th><th>Notes</th></tr></thead><tbody>'; for(const r of report){ const a = r.sheetA; const b = r.sheetB; const aStr = a ? `${a.ns} / ${a.ew}` : '<i>missing</i>'; const bStr = b ? `${b.ns} / ${b.ew}` : '<i>missing</i>'; const note = r.mismatch ? (a&&b? 'Score mismatch':'Missing on one sheet') : 'OK'; html += `<tr class="${r.mismatch? 'mismatch':''}"><td>${r.board}</td><td>${aStr}</td><td>${bStr}</td><td>${r.diffNS===null?'-':r.diffNS}</td><td>${r.diffEW===null?'-':r.diffEW}</td><td>${note}</td></tr>`; } html += '</tbody></table>'; outDiv.innerHTML = html; }
 
     // wire up elements
     const file1=document.getElementById('file1'); const file2=document.getElementById('file2'); const canvas1=document.getElementById('canvas1'); const canvas2=document.getElementById('canvas2'); const runBtn=document.getElementById('runBtn'); const resultPre=document.getElementById('result'); const cands1Span=document.getElementById('cands1'); const cands2Span=document.getElementById('cands2'); const auto1Span=document.getElementById('auto1'); const auto2Span=document.getElementById('auto2'); const manual1=document.getElementById('manual1'); const manual2=document.getElementById('manual2');
-
     let roiSelector1=null, roiSelector2=null;
     document.getElementById('startRoi1').addEventListener('click', ()=>{ roiSelector1=enableRoiSelection(canvas1); resultPre.textContent='Draw rectangle on Image 1 then Crop.'; });
     document.getElementById('startRoi2').addEventListener('click', ()=>{ roiSelector2=enableRoiSelection(canvas2); resultPre.textContent='Draw rectangle on Image 2 then Crop.'; });
@@ -240,37 +125,53 @@
     document.getElementById('reset1').addEventListener('click', async ()=>{ if(file1.files[0]){ await drawFileToCanvas(file1.files[0],canvas1); cands1Span.textContent='-'; if(auto1Span) auto1Span.textContent='-'; manual1.value=''; resultPre.textContent='Image 1 reset.'; }});
     document.getElementById('reset2').addEventListener('click', async ()=>{ if(file2.files[0]){ await drawFileToCanvas(file2.files[0],canvas2); cands2Span.textContent='-'; if(auto2Span) auto2Span.textContent='-'; manual2.value=''; resultPre.textContent='Image 2 reset.'; }});
     document.getElementById('rotL1').addEventListener('click', ()=>rotateCanvas(canvas1,-90)); document.getElementById('rotR1').addEventListener('click', ()=>rotateCanvas(canvas1,90)); document.getElementById('rotL2').addEventListener('click', ()=>rotateCanvas(canvas2,-90)); document.getElementById('rotR2').addEventListener('click', ()=>rotateCanvas(canvas2,90));
-
     file1.addEventListener('change', async ()=>{ if(file1.files[0]){ await drawFileToCanvas(file1.files[0], canvas1); cands1Span.textContent='-'; if(auto1Span) auto1Span.textContent='-'; manual1.value=''; }});
     file2.addEventListener('change', async ()=>{ if(file2.files[0]){ await drawFileToCanvas(file2.files[0], canvas2); cands2Span.textContent='-'; if(auto2Span) auto2Span.textContent='-'; manual2.value=''; }});
 
-    // DEBUG: immediate feedback and safety checks
+    // Main run handler: runs OCR, shows candidates and also parses full sheets and compares
     runBtn.addEventListener('click', async ()=>{
       appendLog('Run button clicked');
       if(!file1.files[0] || !file2.files[0]){ alert('Please choose both images.'); appendLog('Missing files'); return; }
       if(typeof Tesseract === 'undefined') { appendLog('Tesseract is undefined on click'); alert('OCR library not loaded. See console/logs.'); return; }
       resultPre.textContent='Running OCR (this may take some seconds)...';
       try{
-        appendLog('Beginning OCR for image1');
-        const cands1 = await ocrTryMultiplePSM(canvas1);
-        appendLog('Image1 candidates: ' + JSON.stringify(cands1));
-        cands1Span.textContent = cands1.join(', ')||'-'; const score1Auto = chooseMostLikely(cands1); if(auto1Span) auto1Span.textContent = score1Auto===null?'-':score1Auto;
-        appendLog('Beginning OCR for image2');
-        const cands2 = await ocrTryMultiplePSM(canvas2);
-        appendLog('Image2 candidates: ' + JSON.stringify(cands2));
-        cands2Span.textContent = cands2.join(', ')||'-'; const score2Auto = chooseMostLikely(cands2); if(auto2Span) auto2Span.textContent = score2Auto===null?'-':score2Auto;
+        // quick numeric candidates for the simple UI
+        appendLog('Beginning numeric candidate OCR for image1');
+        const cands1 = await (async ()=>{ const modes=[7,6]; const s=new Set(); for(const m of modes){ try{ const t=await ocrCanvasWithPSMRecognize(canvas1,m,20000); (extractIntegers(t)||[]).forEach(i=>s.add(i)); }catch(e){ appendLog('num OCR img1 psm='+m+' failed: '+e.message); } } return Array.from(s).sort((a,b)=>a-b); })();
+        appendLog('Image1 numeric candidates: '+JSON.stringify(cands1)); cands1Span.textContent = cands1.join(', ')||'-'; const score1Auto=chooseMostLikely(cands1); if(auto1Span) auto1Span.textContent=score1Auto===null?'-':score1Auto;
 
+        appendLog('Beginning numeric candidate OCR for image2');
+        const cands2 = await (async ()=>{ const modes=[7,6]; const s=new Set(); for(const m of modes){ try{ const t=await ocrCanvasWithPSMRecognize(canvas2,m,20000); (extractIntegers(t)||[]).forEach(i=>s.add(i)); }catch(e){ appendLog('num OCR img2 psm='+m+' failed: '+e.message); } } return Array.from(s).sort((a,b)=>a-b); })();
+        appendLog('Image2 numeric candidates: '+JSON.stringify(cands2)); cands2Span.textContent = cands2.join(', ')||'-'; const score2Auto=chooseMostLikely(cands2); if(auto2Span) auto2Span.textContent=score2Auto===null?'-':score2Auto;
+
+        // Full OCR text for parsing sheets
+        appendLog('Running full OCR (multi-psm) to extract sheet text for parsing...');
+        const text1 = await runFullOCRText(canvas1);
+        const text2 = await runFullOCRText(canvas2);
+        appendLog('Full OCR lengths: '+text1.length+' / '+text2.length);
+
+        const sheet1 = parseScoreSheet(text1);
+        const sheet2 = parseScoreSheet(text2);
+        appendLog('Parsed rows: sheet1='+sheet1.length+' sheet2='+sheet2.length);
+        const report = compareSheets(sheet1, sheet2);
+        renderComparison(report);
+
+        // Existing summary output (IMPs) using auto or manual overrides
         const score1Final = manual1 && manual1.value ? parseInt(manual1.value,10) : score1Auto;
         const score2Final = manual2 && manual2.value ? parseInt(manual2.value,10) : score2Auto;
         let out=''; out += `Image 1 candidates: ${cands1.join(', ') || '-'}\n`; out += `Image 1 auto-chosen score: ${score1Auto === null ? 'N/A' : score1Auto}\n`; out += `Image 1 final score (manual override if set): ${score1Final === null || score1Final === undefined ? 'N/A' : score1Final}\n\n`; out += `Image 2 candidates: ${cands2.join(', ') || '-'}\n`; out += `Image 2 auto-chosen score: ${score2Auto === null ? 'N/A' : score2Auto}\n`; out += `Image 2 final score (manual override if set): ${score2Final === null || score2Final === undefined ? 'N/A' : score2Final}\n\n`;
         if(score1Final == null || score2Final == null || Number.isNaN(score1Final) || Number.isNaN(score2Final)) { out += 'Could not determine a numeric score for one or both images. Try cropping to the score region or use manual override.\n'; }
         else { const diff = score1Final - score2Final; const imps = pointsToImps(diff); out += `Point difference (img1 - img2): ${diff}\n`; out += `IMPs: ${imps}\n`; }
         resultPre.textContent = out;
-      }catch(err){ appendLog('Run handler error: ' + (err && err.message?err.message:err)); resultPre.textContent='Error: ' + (err && err.message?err.message:err); }
+      }catch(err){ appendLog('Run handler error: '+(err && err.message?err.message:err)); resultPre.textContent='Error: ' + (err && err.message?err.message:err); }
     });
 
-    // Expose helpers for console debugging
-    window._debug = { ocrTryMultiplePSM, ocrCanvasWithPSMRecognize, appendLog };
+    // ROI and crop functions
+    function enableRoiSelection(canvas){ let selecting=false, startX=0, startY=0, curX=0, curY=0; const ctx=canvas.getContext('2d'); let saved=null; function onDown(e){ selecting=true; const r=canvas.getBoundingClientRect(); startX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); startY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); try{ saved=ctx.getImageData(0,0,canvas.width,canvas.height);}catch(e){saved=null;} } function onMove(e){ if(!selecting) return; const r=canvas.getBoundingClientRect(); curX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); curY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); if(saved) ctx.putImageData(saved,0,0); ctx.strokeStyle='red'; ctx.lineWidth=Math.max(2,canvas.width/400); ctx.strokeRect(Math.min(startX,curX),Math.min(startY,curY),Math.abs(curX-startX),Math.abs(curY-startY)); } function onUp(e){ if(!selecting) return; selecting=false; const r=canvas.getBoundingClientRect(); curX=Math.round((e.clientX-r.left)*(canvas.width/r.width)); curY=Math.round((e.clientY-r.top)*(canvas.height/r.height)); if(saved) ctx.putImageData(saved,0,0); ctx.strokeStyle='red'; ctx.lineWidth=Math.max(2,canvas.width/400); ctx.strokeRect(Math.min(startX,curX),Math.min(startY,curY),Math.abs(curX-startX),Math.abs(curY-startY)); } canvas.addEventListener('mousedown', onDown); canvas.addEventListener('mousemove', onMove); canvas.addEventListener('mouseup', onUp); function finalize(){ canvas.removeEventListener('mousedown', onDown); canvas.removeEventListener('mousemove', onMove); canvas.removeEventListener('mouseup', onUp); const x=Math.min(startX,curX), y=Math.min(startY,curY), w=Math.abs(curX-startX), h=Math.abs(curY-startY); return {x,y,w,h}; } return { finalize }; }
+    function cropCanvasToRect(canvas, rect){ if(!rect||rect.w<=0||rect.h<=0) return canvas; const tmp=document.createElement('canvas'); tmp.width=rect.w; tmp.height=rect.h; const ctx=tmp.getContext('2d'); ctx.drawImage(canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h); const scaleUp=2; const scaled=document.createElement('canvas'); scaled.width=Math.round(tmp.width*scaleUp); scaled.height=Math.round(tmp.height*scaleUp); const sctx=scaled.getContext('2d'); sctx.imageSmoothingEnabled=true; sctx.drawImage(tmp,0,0,scaled.width,scaled.height); canvas.width=scaled.width; canvas.height=scaled.height; const octx=canvas.getContext('2d'); octx.drawImage(scaled,0,0); return canvas; }
+
+    // expose debug helpers
+    window._debug = { ocrTryMultiplePSM, ocrCanvasWithPSMRecognize, runFullOCRText, parseScoreSheet, compareSheets, appendLog };
   </script>
 </body>
 </html>
