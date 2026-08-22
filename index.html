@@ -24,7 +24,7 @@
 </head>
 <body>
   <h1>Bridge Score Compare (Client-side)</h1>
-  <p>Upload two images of score sheets. OCR runs locally in your browser, then the app reports point difference and IMPs. You can select a region of interest (ROI) on each image to improve OCR accuracy and manually override extracted scores before computing.</p>
+  <p>Upload two images of score sheets. OCR runs locally in your browser, then the app reports per-board score differences. ROI tools are available to help isolate the score table.</p>
 
   <div class="row">
     <div class="col">
@@ -104,16 +104,54 @@
     function extractIntegers(text){ const matches = text ? text.match(/-?\d+/g) : null; if(!matches) return []; return matches.map(s=>parseInt(s,10)).filter(n=>Number.isFinite(n)); }
     function chooseMostLikely(candidates){ if(!candidates||candidates.length===0) return null; const positives=candidates.filter(n=>n>0&&Math.abs(n)<100000); if(positives.length) return Math.max(...positives); return candidates[candidates.length-1]; }
 
-    // Parser and comparer (from spec)
-    function parseScoreSheet(text){ if(!text) return []; const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean); const rows=[]; for(const raw of lines){ const line = raw.replace(/\t+/g,' ').replace(/\s{2,}/g,' ').trim(); const ints = (line.match(/-?\d+/g) || []).map(s=>parseInt(s,10)); if(ints.length < 2) continue; const ew = ints[ints.length-1]; const ns = ints[ints.length-2]; let board = null; const boardMatch = line.match(/\b([1-9][0-9]{0,2})\b/); if(boardMatch) board = parseInt(boardMatch[1],10); const contractMatch = line.match(/\b([1-7])\s*(NT|N|H|S|D|C|♠|♥|♦|♣)\b/i); const contract = contractMatch ? (contractMatch[1] + (contractMatch[2].toUpperCase())) : ''; const declarerMatch = line.match(/\b(North|South|East|West|N|S|E|W)\b/i); let declarer = declarerMatch ? declarerMatch[0].toUpperCase() : ''; if(declarer && declarer.length>1) declarer = declarer[0]; const vulnMatch = line.match(/\b(None|NS|N\/S|N-S|EW|E\/W|E-W|All|Both|Vul|Vulnerability)\b/i); let vulnerability = vulnMatch ? vulnMatch[1] : ''; if(vulnerability) vulnerability = vulnerability.replace(/\//g,'-'); const allInts = (line.match(/\b[0-9]{1,2}\b/g) || []).map(s=>parseInt(s,10)); let tricks = ''; if(allInts.length){ let clueInts = allInts.slice(); while(clueInts.length>=1 && (clueInts[clueInts.length-1]===ew || clueInts[clueInts.length-1]===ns)) clueInts.pop(); for(let i=clueInts.length-1;i>=0;--i){ const v=clueInts[i]; if(v>=0&&v<=13&&v!==board){ tricks = v; break; } } }
-      if(board===null) continue; rows.push({ board, vulnerability: vulnerability||'', contract: contract||'', declarer: declarer||'', tricks: tricks!==''?tricks:'', ns, ew, rawLine: raw }); }
-      const seen = new Map(); for(const r of rows){ if(!seen.has(r.board)) seen.set(r.board,r); } return Array.from(seen.values()).sort((a,b)=>a.board-b.board);
+    // Parser and comparer (multi-line aware)
+    function parseScoreSheet(text){ if(!text) return []; // split into lines and merge lines that belong to the same board entry
+      const rawLines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+      const records = [];
+      let cur = null;
+      for(const line of rawLines){ // start a new record when line begins with a board number or the word 'Board'
+        if(/^\s*(?:Board\b)?\s*([1-9][0-9]{0,2})\b/i.test(line)){
+          // push previous
+          if(cur) records.push(cur);
+          cur = line;
+        } else {
+          // continuation line — append
+          if(cur) cur += ' ' + line;
+          else cur = line; // no current record, treat as start
+        }
+      }
+      if(cur) records.push(cur);
+
+      const rows = [];
+      for(const rec of records){ // extract board number
+        const bm = rec.match(/\b([1-9][0-9]{0,2})\b/);
+        if(!bm) continue; const board = parseInt(bm[1],10);
+        // extract all integers (signed)
+        const nums = (rec.match(/[+-]?\d+/g) || []).map(s=>parseInt(s,10)).filter(n=>Number.isFinite(n));
+        let ns = null, ew = null, net = null;
+        if(nums.length >= 2){ // assume last two are NS and EW (as per sheet layout)
+          ns = nums[nums.length - 2];
+          ew = nums[nums.length - 1];
+        } else if(nums.length === 1){ // only one number present — it may be signed
+          // treat as net score directly
+          net = nums[0];
+        }
+        // compute net representing NS positive, EW negative
+        if(net === null){
+          if(ns !== null && !isNaN(ns)) net = ns; // prefer NS if present
+          else if(ew !== null && !isNaN(ew)) net = (ew < 0 ? ew : -Math.abs(ew)); // if only EW found, represent as negative
+        }
+        rows.push({ board, ns: ns, ew: ew, net: net, rawLine: rec });
+      }
+      // dedupe by board
+      const seen = new Map(); for(const r of rows){ if(!seen.has(r.board)) seen.set(r.board,r); }
+      return Array.from(seen.values()).sort((a,b)=>a.board-b.board);
     }
 
-    function compareSheets(sheetA,sheetB){ const mapA=new Map(); sheetA.forEach(r=>mapA.set(r.board,r)); const mapB=new Map(); sheetB.forEach(r=>mapB.set(r.board,r)); const allBoards=new Set([...mapA.keys(),...mapB.keys()]); const results=[]; for(const board of Array.from(allBoards).sort((a,b)=>a-b)){ const a=mapA.get(board)||null; const b=mapB.get(board)||null; const diffNS = (a&&b)?(a.ns - b.ns):null; const diffEW = (a&&b)?(a.ew - b.ew):null; const mismatch = (a&&b)?(a.ns !== b.ns || a.ew !== b.ew): true; results.push({ board, sheetA: a, sheetB: b, mismatch, diffNS, diffEW }); } return results; }
+    function compareSheets(sheetA, sheetB){ const mapA=new Map(); sheetA.forEach(r=>mapA.set(r.board,r)); const mapB=new Map(); sheetB.forEach(r=>mapB.set(r.board,r)); const allBoards=new Set([...mapA.keys(),...mapB.keys()]); const results=[]; for(const board of Array.from(allBoards).sort((a,b)=>a-b)){ const a=mapA.get(board)||null; const b=mapB.get(board)||null; const netA = a && a.net !== null && a.net !== undefined ? a.net : null; const netB = b && b.net !== null && b.net !== undefined ? b.net : null; const mismatch = (netA === null || netB === null) ? true : (netA !== netB); const diff = (netA === null || netB === null) ? null : (netA - netB); results.push({ board, sheetA: a, sheetB: b, netA, netB, diff, mismatch }); } return results; }
 
     // UI helpers for comparison display
-    function renderComparison(report){ const outDiv = document.getElementById('compareResult'); if(!report || report.length===0){ outDiv.innerHTML = '<i>No parsed boards found.</i>'; return; } let html = '<table><thead><tr><th>Board</th><th>Sheet A (NS / EW)</th><th>Sheet B (NS / EW)</th><th>Difference (NS)</th><th>Difference (EW)</th><th>Notes</th></tr></thead><tbody>'; for(const r of report){ const a = r.sheetA; const b = r.sheetB; const aStr = a ? `${a.ns} / ${a.ew}` : '<i>missing</i>'; const bStr = b ? `${b.ns} / ${b.ew}` : '<i>missing</i>'; const note = r.mismatch ? (a&&b? 'Score mismatch':'Missing on one sheet') : 'OK'; html += `<tr class="${r.mismatch? 'mismatch':''}"><td>${r.board}</td><td>${aStr}</td><td>${bStr}</td><td>${r.diffNS===null?'-':r.diffNS}</td><td>${r.diffEW===null?'-':r.diffEW}</td><td>${note}</td></tr>`; } html += '</tbody></table>'; outDiv.innerHTML = html; }
+    function renderComparison(report){ const outDiv = document.getElementById('compareResult'); if(!report || report.length===0){ outDiv.innerHTML = '<i>No parsed boards found.</i>'; return; } let html = '<table><thead><tr><th>Board</th><th>Sheet A (net, NS+/EW-)</th><th>Sheet B (net, NS+/EW-)</th><th>Difference (A - B)</th><th>IMPs (from diff)</th><th>Note</th></tr></thead><tbody>'; for(const r of report){ const a = r.sheetA; const b = r.sheetB; const aStr = r.netA !== null && r.netA !== undefined ? String(r.netA) : '<i>missing</i>'; const bStr = r.netB !== null && r.netB !== undefined ? String(r.netB) : '<i>missing</i>'; const diffStr = r.diff === null ? '-' : String(r.diff); const impsStr = r.diff === null ? '-' : String(pointsToImps(r.diff)); const note = r.mismatch ? (r.netA===null||r.netB===null ? 'Missing on one sheet' : 'Score mismatch') : 'OK'; html += `<tr class="${r.mismatch? 'mismatch':''}"><td>${r.board}</td><td>${aStr}</td><td>${bStr}</td><td>${diffStr}</td><td>${impsStr}</td><td>${note}</td></tr>`; } html += '</tbody></table>'; outDiv.innerHTML = html; }
 
     // wire up elements
     const file1=document.getElementById('file1'); const file2=document.getElementById('file2'); const canvas1=document.getElementById('canvas1'); const canvas2=document.getElementById('canvas2'); const runBtn=document.getElementById('runBtn'); const resultPre=document.getElementById('result'); const cands1Span=document.getElementById('cands1'); const cands2Span=document.getElementById('cands2'); const auto1Span=document.getElementById('auto1'); const auto2Span=document.getElementById('auto2'); const manual1=document.getElementById('manual1'); const manual2=document.getElementById('manual2');
@@ -128,7 +166,7 @@
     file1.addEventListener('change', async ()=>{ if(file1.files[0]){ await drawFileToCanvas(file1.files[0], canvas1); cands1Span.textContent='-'; if(auto1Span) auto1Span.textContent='-'; manual1.value=''; }});
     file2.addEventListener('change', async ()=>{ if(file2.files[0]){ await drawFileToCanvas(file2.files[0], canvas2); cands2Span.textContent='-'; if(auto2Span) auto2Span.textContent='-'; manual2.value=''; }});
 
-    // Main run handler: runs OCR, shows candidates and also parses full sheets and compares
+    // Main run handler: runs OCR, shows candidates and also parses full sheets and compares (uses net scores)
     runBtn.addEventListener('click', async ()=>{
       appendLog('Run button clicked');
       if(!file1.files[0] || !file2.files[0]){ alert('Please choose both images.'); appendLog('Missing files'); return; }
@@ -155,6 +193,11 @@
         appendLog('Parsed rows: sheet1='+sheet1.length+' sheet2='+sheet2.length);
         const report = compareSheets(sheet1, sheet2);
         renderComparison(report);
+
+        // Build simple per-board CSV download as well
+        const csvRows = [['Board','SheetA_net','SheetB_net','Diff','IMPs','Note']];
+        for(const r of report){ const note = r.mismatch ? (r.netA===null||r.netB===null ? 'Missing' : 'Mismatch') : 'OK'; csvRows.push([r.board, r.netA===null?'':r.netA, r.netB===null?'':r.netB, r.diff===null?'':r.diff, r.diff===null?'':pointsToImps(r.diff), note]); }
+        const csv = csvRows.map(row=>row.map(cell=>`"${String(cell||'').replace(/"/g,'""') }"`).join(',')).join('\n'); const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob); let link=document.getElementById('downloadDiff'); if(!link){ link=document.createElement('a'); link.id='downloadDiff'; link.style.display='inline-block'; link.style.marginTop='8px'; document.getElementById('compareResult').appendChild(link);} link.href=url; link.download='board_differences_net.csv'; link.textContent='Download per-board net differences CSV';
 
         // Existing summary output (IMPs) using auto or manual overrides
         const score1Final = manual1 && manual1.value ? parseInt(manual1.value,10) : score1Auto;
